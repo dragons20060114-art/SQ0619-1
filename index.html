@@ -9,7 +9,7 @@
     <!-- 手機端優化標籤 -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="theme-color" content="#F5F5F7">
+    <meta name="theme-color" content="#FFFBEB">
     <meta name="format-detection" content="telephone=no">
     
     <script src="https://cdn.tailwindcss.com"></script>
@@ -17,14 +17,13 @@
     <style>
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            -webkit-tap-highlight-color: transparent; /* 移除手機點擊時的藍色高亮 */
+            -webkit-tap-highlight-color: transparent;
         }
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #E5E7EB; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #FDE68A; border-radius: 10px; }
         input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         
-        /* 防止手機端輸入框自動放大 */
         @media screen and (max-width: 768px) {
             input, textarea { font-size: 16px !important; }
         }
@@ -41,7 +40,7 @@
 }
 </script>
 </head>
-<body class="bg-[#F5F5F7] text-[#1D1D1F] antialiased">
+<body class="bg-[#FFFBEB] text-[#1D1D1F] antialiased">
     <div id="root"></div>
 </body>
 </html>
