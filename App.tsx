@@ -41,6 +41,7 @@ import { InputField, Toast, StepIndicator } from './components/UI';
 
 const generateId = () => Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
 
+// 修正後的 GAS 腳本模板，對應 9 個欄位
 const GAS_SCRIPT_TEMPLATE = `function doPost(e) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
   var data;
@@ -50,19 +51,31 @@ const GAS_SCRIPT_TEMPLATE = `function doPost(e) {
     return ContentService.createTextOutput("Fail: Invalid JSON").setMimeType(ContentService.MimeType.TEXT);
   }
   
-  var itemDetails = data.items.map(function(i){
-    var addon = i.hasAddon && i.addonName ? " (+加料:" + i.addonName + ")" : "";
-    var note = i.note ? " [" + i.note + "]" : "";
-    return i.name + " x" + i.quantity + addon + note;
-  }).join(", ");
+  // 1. 餐點明細 (雞肉飯x1; 滷蛋x2)
+  var itemSummary = data.items.map(function(i){ 
+    return i.name + "x" + i.quantity; 
+  }).join("; ");
 
+  // 2. 加料詳情 (加蛋; 加起司)
+  var addonSummary = data.items.map(function(i){ 
+    return (i.hasAddon && i.addonName) ? i.addonName : ""; 
+  }).filter(function(t){ return t !== ""; }).join("; ");
+
+  // 3. 品項備註 (去冰; 微辣)
+  var itemNoteSummary = data.items.map(function(i){ 
+    return i.note || ""; 
+  }).filter(function(t){ return t !== ""; }).join("; ");
+
+  // 寫入一行資料：時間, 姓名, 工號, 電話, 餐點明細, 加料詳情, 品項備註, 全單總備註, 總額
   sheet.appendRow([
     new Date(),
     data.empName,
-    data.empId,
-    data.phone,
-    itemDetails,
-    data.orderNote,
+    data.empId || "",
+    data.phone || "",
+    itemSummary,
+    addonSummary,
+    itemNoteSummary,
+    data.orderNote || "",
     data.total
   ]);
   
@@ -81,7 +94,7 @@ const shrink = {
           t: data.total, 
           ts: data.timestamp, 
           i: data.items.map((it: any) => ({ 
-            n: it.name, p: it.price, nt: it.note, h: it.hasAddon, an: it.addonName, ap: it.addonPrice, q: it.quantity 
+            n: it.n, p: it.price, nt: it.note, h: it.hasAddon, an: it.addonName, ap: it.addonPrice, q: it.quantity 
           })) 
         };
     const json = JSON.stringify(minified);
@@ -462,7 +475,7 @@ const App: React.FC = () => {
                            <li>在編輯器點擊「部署」→「新增部署」</li>
                            <li>類型選「網頁應用程式」，執行身分選「我」</li>
                            <li>存取權選「所有人」(Anyone)，這是最關鍵的一步</li>
-                           <li><span className="text-red-500">注意：</span>在編輯器點「執行」會報錯是正常的，請直接部署。</li>
+                           <li><span className="text-red-500 font-black">注意：</span>在編輯器點「執行」會報錯是正常的，請直接部署。</li>
                          </ul>
                       </div>
                     </div>
