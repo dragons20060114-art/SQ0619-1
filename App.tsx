@@ -28,7 +28,12 @@ import {
   Send,
   Undo2,
   ShoppingBag,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Link,
+  CloudUpload,
+  ExternalLink,
+  Info,
+  Code
 } from 'lucide-react';
 import { OrderItem, UserInfo, OrderHistoryEntry, Step } from './types';
 import { analyzeMenuContent } from './services/geminiService';
@@ -36,10 +41,38 @@ import { InputField, Toast, StepIndicator } from './components/UI';
 
 const generateId = () => Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
 
+const GAS_SCRIPT_TEMPLATE = `function doPost(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+  var data;
+  try {
+    data = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return ContentService.createTextOutput("Fail: Invalid JSON").setMimeType(ContentService.MimeType.TEXT);
+  }
+  
+  var itemDetails = data.items.map(function(i){
+    var addon = i.hasAddon && i.addonName ? " (+加料:" + i.addonName + ")" : "";
+    var note = i.note ? " [" + i.note + "]" : "";
+    return i.name + " x" + i.quantity + addon + note;
+  }).join(", ");
+
+  sheet.appendRow([
+    new Date(),
+    data.empName,
+    data.empId,
+    data.phone,
+    itemDetails,
+    data.orderNote,
+    data.total
+  ]);
+  
+  return ContentService.createTextOutput("OK").setMimeType(ContentService.MimeType.TEXT);
+}`;
+
 const shrink = {
-  async compress(data: any): Promise<string> {
+  async compress(data: any, extra?: any): Promise<string> {
     const minified = Array.isArray(data) 
-      ? data.map(i => ({ n: i.name, p: i.price, nt: i.note, h: i.hasAddon, an: i.addonName, ap: i.addonPrice }))
+      ? { m: data.map(i => ({ n: i.name, p: i.price, nt: i.note, h: i.hasAddon, an: i.addonName, ap: i.addonPrice })), x: extra }
       : { 
           id: data.empId, 
           nm: data.empName, 
@@ -72,10 +105,13 @@ const shrink = {
       const decompressedStream = stream.pipeThrough(new DecompressionStream('gzip'));
       const text = await new Response(decompressedStream).text();
       const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) {
-        return parsed.map(i => ({ 
-          name: i.n, price: i.price || i.p, note: i.note || i.nt, hasAddon: i.hasAddon || i.h, addonName: i.addonName || i.an, addonPrice: i.addonPrice || i.ap 
-        }));
+      if (parsed.m) {
+        return {
+          menu: parsed.m.map((i: any) => ({ 
+            name: i.n, price: i.price || i.p, note: i.note || i.nt, hasAddon: i.hasAddon || i.h, addonName: i.addonName || i.an, addonPrice: i.addonPrice || i.ap 
+          })),
+          extra: parsed.x
+        };
       } else {
         return { 
           empId: parsed.id, 
@@ -105,8 +141,11 @@ const App: React.FC = () => {
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [importText, setImportText] = useState('');
+  const [gasUrl, setGasUrl] = useState('');
+  const [activeGasUrl, setActiveGasUrl] = useState<string | null>(null);
   const [manualCodeInput, setManualCodeInput] = useState('');
   const [showCodeInput, setShowCodeInput] = useState(false);
+  const [showGasConfig, setShowGasConfig] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [userInfo, setUserInfo] = useState<UserInfo>(() => {
@@ -120,6 +159,14 @@ const App: React.FC = () => {
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const encoded = params.get('m');
+    if (encoded) {
+      handleImport(encoded, true);
+    }
   }, []);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -153,9 +200,10 @@ const App: React.FC = () => {
     if (menuTemplate.length === 0) { showToast('請先建立菜單內容', 'error'); return; }
     setIsLoading(true);
     try {
-      const code = await shrink.compress(menuTemplate);
-      navigator.clipboard.writeText(`MENU:${code}`);
-      showToast('菜單分享碼已複製！可發給同事點餐');
+      const code = await shrink.compress(menuTemplate, { gas: gasUrl });
+      const shareUrl = `${window.location.origin}${window.location.pathname}?m=${encodeURIComponent(code)}`;
+      navigator.clipboard.writeText(shareUrl);
+      showToast('點餐專屬連結已複製！');
     } catch (e) { showToast('生成失敗', 'error'); }
     finally { setIsLoading(false); }
   };
@@ -206,21 +254,44 @@ const App: React.FC = () => {
     setStep(Step.Success);
   };
 
+  const handleGasSubmit = async () => {
+    if (!activeGasUrl) return;
+    setIsLoading(true);
+    const latestOrder = history[0];
+    try {
+      await fetch(activeGasUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(latestOrder)
+      });
+      showToast('點單已成功傳送至試算表！');
+    } catch (e) {
+      showToast('傳送發生錯誤，請通知主辦人', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleImport = async (text: string, isMenu: boolean) => {
     if (!text.trim()) return;
     try {
-      const cleanText = text.includes(':') ? text.split(':')[1] : text;
+      const cleanText = text.includes('m=') ? new URLSearchParams(text.split('?')[1]).get('m') || text : text;
       const decoded = await shrink.decompress(cleanText);
-      if (isMenu) {
-        setItems(decoded.map((i: any) => ({ ...i, id: generateId(), quantity: 0 })));
+      if (isMenu || decoded.menu) {
+        const menuData = decoded.menu || decoded;
+        setItems(menuData.map((i: any) => ({ ...i, id: generateId(), quantity: 0 })));
+        if (decoded.extra?.gas) {
+          setActiveGasUrl(decoded.extra.gas);
+        }
         showToast('菜單載入成功！');
         setShowCodeInput(false);
       } else {
         setHistory(prev => [decoded, ...prev]);
         setImportText('');
-        showToast('同事點單匯入成功！');
+        showToast('點單匯入成功！');
       }
-    } catch (e) { showToast('解析失敗，請確認代碼完整性', 'error'); }
+    } catch (e) { showToast('解析失敗', 'error'); }
   };
 
   const getReportData = (delimiter: string = ',') => {
@@ -254,6 +325,12 @@ const App: React.FC = () => {
         <header className="mb-8 text-center animate-in slide-in-from-top-4">
           <h1 className="text-4xl font-black tracking-tight mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">QuickBite</h1>
           <p className="text-gray-500 font-medium text-[10px] tracking-[0.2em] uppercase">Office Lunch Ordering Mastery</p>
+          {activeGasUrl && (
+            <div className="mt-4 inline-flex items-center gap-2 bg-blue-50 text-blue-600 px-4 py-1.5 rounded-full border border-blue-100 animate-in fade-in">
+              <CloudUpload size={14} className="animate-bounce" />
+              <span className="text-[10px] font-black uppercase tracking-wider">已連結 Google 試算表回填系統</span>
+            </div>
+          )}
         </header>
 
         <div className="bg-white rounded-[2.5rem] shadow-2xl shadow-blue-900/5 border border-white p-6 md:p-10 mb-8 relative overflow-hidden">
@@ -269,13 +346,13 @@ const App: React.FC = () => {
                   </button>
                   <button onClick={() => setShowCodeInput(!showCodeInput)} className={`flex flex-col items-center justify-center gap-2 p-4 rounded-[2rem] border-2 transition-all active:scale-95 ${showCodeInput ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-gray-100 text-gray-600 hover:border-indigo-100'}`}>
                     <div className={`${showCodeInput ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-400'} p-2 rounded-xl`}><QrCode size={24} /></div>
-                    <span className="text-sm font-black">匯入分享菜單</span>
+                    <span className="text-sm font-black">匯入點餐連結</span>
                   </button>
                 </div>
                 {showCodeInput && (
                   <div className="p-4 bg-indigo-50 rounded-3xl border border-indigo-100 animate-in slide-in-from-top-4">
                     <div className="flex gap-2">
-                      <input placeholder="貼上同事分享的 MENU 代碼..." className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-black" value={manualCodeInput} onChange={(e) => setManualCodeInput(e.target.value)} />
+                      <input placeholder="貼上點餐連結或 MENU 代碼..." className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-black" value={manualCodeInput} onChange={(e) => setManualCodeInput(e.target.value)} />
                       <button onClick={() => handleImport(manualCodeInput, true)} className="bg-indigo-600 text-white px-6 rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors">載入</button>
                     </div>
                   </div>
@@ -298,7 +375,7 @@ const App: React.FC = () => {
                 {items.length === 0 || (items.length === 1 && !items[0].name) ? (
                   <div className="text-center py-16 border-2 border-dashed border-gray-100 rounded-[2.5rem]">
                     <ShoppingBag size={40} className="mx-auto opacity-10 mb-4" />
-                    <p className="text-sm text-gray-300 font-black leading-relaxed">拍照辨識菜單或手動新增<br/>主辦人可點選下方按鈕分享菜單</p>
+                    <p className="text-sm text-gray-300 font-black leading-relaxed">拍照辨識菜單或手動新增<br/>主辦人可設定 GAS 自動回填試算表</p>
                   </div>
                 ) : (
                   items.map((item) => (
@@ -353,12 +430,49 @@ const App: React.FC = () => {
               </div>
 
               <div className="mt-8 pt-8 border-t border-gray-100">
-                <div className="mb-6 text-center">
-                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-3 ml-1 text-center">主辦人專用：分享菜單給同事點餐</p>
+                <div className="mb-6 space-y-4">
+                  <div className="flex justify-between items-center px-1">
+                    <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest">主辦人自動化工具</p>
+                    <button onClick={() => setShowGasConfig(!showGasConfig)} className="text-[10px] font-black text-blue-600 flex items-center gap-1">
+                      {showGasConfig ? '收起設定' : '設定 GAS 回填'}
+                    </button>
+                  </div>
+                  
+                  {showGasConfig && (
+                    <div className="p-6 bg-blue-50/50 rounded-[2rem] border border-blue-100 animate-in slide-in-from-top-2 space-y-4">
+                      <div className="bg-white p-4 rounded-2xl shadow-sm">
+                        <p className="text-[11px] font-black text-gray-800 mb-3 flex items-center gap-2 uppercase">
+                          <Code size={16} className="text-blue-600" /> 第一步：複製腳本
+                        </p>
+                        <button onClick={() => { navigator.clipboard.writeText(GAS_SCRIPT_TEMPLATE); showToast('腳本已複製！'); }} className="w-full py-3 bg-blue-600 text-white rounded-xl text-xs font-black flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-95 transition-all">
+                          一鍵複製 GAS 腳本代碼
+                        </button>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-2xl shadow-sm">
+                        <p className="text-[11px] font-black text-gray-800 mb-3 flex items-center gap-2 uppercase">
+                          <Link size={16} className="text-blue-600" /> 第二步：貼上網頁應用程式 URL
+                        </p>
+                        <input placeholder="https://script.google.com/macros/s/..." className="w-full bg-gray-50 border border-blue-100 rounded-xl px-4 py-3 text-xs font-black focus:ring-2 focus:ring-blue-400 outline-none" value={gasUrl} onChange={(e) => setGasUrl(e.target.value)} />
+                      </div>
+
+                      <div className="p-4 bg-white/50 rounded-2xl border border-dashed border-blue-200">
+                         <p className="text-[10px] font-bold text-blue-700 flex items-center gap-2 mb-2"><Info size={14}/> 部署提醒：</p>
+                         <ul className="text-[9px] text-gray-500 font-bold space-y-1 ml-1 list-disc list-inside">
+                           <li>在編輯器點擊「部署」→「新增部署」</li>
+                           <li>類型選「網頁應用程式」，執行身分選「我」</li>
+                           <li>存取權選「所有人」(Anyone)，這是最關鍵的一步</li>
+                           <li><span className="text-red-500">注意：</span>在編輯器點「執行」會報錯是正常的，請直接部署。</li>
+                         </ul>
+                      </div>
+                    </div>
+                  )}
+
                   <button onClick={generateMenuTemplateCode} className="w-full flex items-center justify-center gap-3 px-6 py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black shadow-xl active:scale-95 transition-all hover:bg-indigo-700">
-                    <Copy size={20} /> 複製菜單分享碼 (發給同事)
+                    <Share2 size={20} /> 複製專屬點餐連結
                   </button>
                 </div>
+                
                 <div className="flex flex-col sm:flex-row justify-between items-center gap-6 bg-gray-50/50 p-6 rounded-[2rem]">
                   <div className="text-left w-full sm:w-auto">
                     <p className="text-[10px] text-gray-400 font-black mb-1 uppercase tracking-tighter">My Subtotal 小計</p>
@@ -429,13 +543,10 @@ const App: React.FC = () => {
               </div>
               <div className="flex flex-col gap-3">
                 <button onClick={handleSubmit} className="w-full bg-blue-600 text-white py-6 rounded-3xl font-black text-xl shadow-2xl flex items-center justify-center gap-3 hover:bg-blue-700 active:scale-95 transition-all">
-                  <Send size={24} /> 確認點單
+                  <Send size={24} /> 確認送出點單
                 </button>
                 <button onClick={() => setStep(Step.UserInfo)} className="w-full bg-gray-100 text-gray-500 py-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2 hover:bg-gray-200 transition-all">
                   <Undo2 size={18} /> 返回修改個人資訊
-                </button>
-                <button onClick={() => setStep(Step.Selection)} className="w-full bg-transparent text-gray-400 py-2 rounded-2xl font-black text-xs flex items-center justify-center gap-2 hover:text-gray-600 transition-all">
-                  返回修改餐點清單
                 </button>
               </div>
             </div>
@@ -445,12 +556,28 @@ const App: React.FC = () => {
             <div className="text-center py-10 animate-in zoom-in-95">
               <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-inner"><CheckCircle2 size={48} /></div>
               <h2 className="text-3xl font-black mb-4 text-gray-800">點單完成！</h2>
-              <p className="text-gray-400 mb-10 text-sm max-w-xs mx-auto font-black leading-relaxed">請點擊下方按鈕複製點單代碼，發回 LINE 給主辦同事彙整。</p>
-              <div className="flex flex-col gap-4 max-w-sm mx-auto">
-                <button onClick={async () => { const code = await shrink.compress(history[0]); navigator.clipboard.writeText(code); showToast('個人點單代碼已複製！'); }} className="bg-blue-600 text-white py-5 px-10 rounded-[2rem] font-black shadow-2xl flex items-center justify-center gap-3 hover:bg-blue-700 active:scale-95 transition-all w-full text-lg">
-                  <Copy size={24} /> 複製個人代碼 (發給主辦)
+              
+              <div className="max-w-sm mx-auto space-y-4">
+                {activeGasUrl ? (
+                  <>
+                    <p className="text-gray-400 mb-6 text-sm font-black leading-relaxed">主辦人已開啟自動回填，請點擊按鈕同步至試算表。</p>
+                    <button onClick={handleGasSubmit} className="bg-blue-600 text-white py-6 px-10 rounded-[2rem] font-black shadow-2xl flex items-center justify-center gap-3 hover:bg-blue-700 active:scale-95 transition-all w-full text-xl group">
+                      <CloudUpload size={28} className="group-hover:animate-bounce" /> 回傳至試算表
+                    </button>
+                    <div className="py-2 flex items-center gap-3">
+                      <div className="flex-1 h-px bg-gray-100"></div>
+                      <span className="text-[10px] text-gray-300 font-bold">備用方案</span>
+                      <div className="flex-1 h-px bg-gray-100"></div>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-gray-400 mb-10 text-sm font-black leading-relaxed">請複製點單代碼，發給主辦同事彙整。</p>
+                )}
+                
+                <button onClick={async () => { const code = await shrink.compress(history[0]); navigator.clipboard.writeText(code); showToast('代碼已複製！'); }} className={`py-5 px-10 rounded-[2rem] font-black shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all w-full ${activeGasUrl ? 'bg-white border-2 border-gray-100 text-gray-400 hover:text-black hover:border-black' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                  <Copy size={20} /> 複製個人點單代碼
                 </button>
-                <button onClick={() => setStep(Step.Selection)} className="mt-8 text-gray-400 text-sm font-black hover:text-black uppercase tracking-widest transition-colors">再點一份</button>
+                <button onClick={() => setStep(Step.Selection)} className="block pt-6 mx-auto text-gray-400 text-xs font-black hover:text-black uppercase tracking-widest transition-colors">再點一份</button>
               </div>
             </div>
           )}
@@ -462,11 +589,11 @@ const App: React.FC = () => {
                   <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><BarChart3 size={24} /></div>
                   彙整中心
                 </h2>
-                <button onClick={() => setStep(Step.Selection)} className="text-sm font-black text-gray-400 hover:text-blue-600 uppercase transition-colors">返回首頁</button>
+                <button onClick={() => setStep(Step.Selection)} className="text-sm font-black text-gray-400 hover:text-blue-600 uppercase transition-colors">返回</button>
               </div>
 
               <div className="mb-10 bg-indigo-50/50 p-8 rounded-[2.5rem] border border-indigo-100">
-                <p className="text-xs text-indigo-700 font-black mb-4 flex items-center gap-2 tracking-widest uppercase"><PackagePlus size={18} /> 匯入同事點單代碼</p>
+                <p className="text-xs text-indigo-700 font-black mb-4 flex items-center gap-2 tracking-widest uppercase"><PackagePlus size={18} /> 手動匯入代碼</p>
                 <div className="flex gap-3">
                   <input placeholder="貼上同事發給您的壓縮代碼..." className="flex-1 bg-white border border-indigo-200 rounded-2xl px-5 py-4 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-black shadow-sm" value={importText} onChange={(e) => setImportText(e.target.value)} />
                   <button onClick={() => handleImport(importText, false)} className="bg-indigo-600 text-white px-8 rounded-2xl font-black text-sm hover:bg-indigo-700 shadow-lg active:scale-95 transition-all">匯入</button>
@@ -476,7 +603,7 @@ const App: React.FC = () => {
               {history.length > 0 ? (
                 <div className="space-y-8">
                   <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-8">
-                    <h3 className="text-xs font-black text-gray-400 uppercase mb-6 border-b pb-4 tracking-tighter">Summary 餐點統計 ({history.length} 人)</h3>
+                    <h3 className="text-xs font-black text-gray-400 uppercase mb-6 border-b pb-4 tracking-tighter">餐點統計 ({history.length} 人)</h3>
                     <div className="space-y-4">
                       {(Object.entries(aggregateStats) as [string, { qty: number, total: number, details: string[] }][]).map(([key, stat]) => (
                         <div key={key} className="flex justify-between items-center bg-gray-50/50 p-4 rounded-2xl border border-gray-50 group hover:border-blue-100 transition-colors">
@@ -485,29 +612,6 @@ const App: React.FC = () => {
                             <p className="text-[10px] text-gray-400 font-black mt-1 leading-tight uppercase">{stat.details.join(' · ')}</p>
                           </div>
                           <div className="text-right ml-4"><p className="text-2xl font-black text-blue-600 font-mono">x{stat.qty}</p></div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-8">
-                    <h3 className="text-xs font-black text-gray-400 uppercase mb-6 border-b pb-4 flex items-center gap-2 tracking-widest"><ListOrdered size={16} /> Details 個人詳情</h3>
-                    <div className="space-y-6">
-                      {history.map((order, idx) => (
-                        <div key={idx} className="p-5 bg-gray-50/30 rounded-3xl border border-gray-100 hover:bg-white hover:shadow-md transition-all group relative">
-                          <button onClick={() => setHistory(history.filter((_, i) => i !== idx))} className="absolute top-4 right-4 text-gray-200 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"><Trash2 size={16} /></button>
-                          <div className="flex justify-between items-start mb-3">
-                            <p className="font-black text-gray-800">{order.empName} <span className="font-normal text-xs text-gray-400">{order.empId && `(${order.empId})`}</span></p>
-                            <p className="font-mono font-black text-blue-600">${order.total}</p>
-                          </div>
-                          <div className="space-y-1 mb-3">
-                            {order.items.map((item, iidx) => (
-                              <p key={iidx} className="text-[11px] text-gray-600 font-bold">• {item.name} x{item.quantity} 
-                                {item.hasAddon && item.addonName && <span className="text-orange-500 ml-1">(加: {item.addonName})</span>}
-                                {item.note && <span className="text-red-400 italic ml-1">({item.note})</span>}
-                              </p>
-                            ))}
-                          </div>
-                          {order.orderNote && <p className="text-[10px] font-bold text-blue-800 bg-blue-50 px-3 py-1.5 rounded-xl mt-1 leading-relaxed border border-blue-100">全單總備註: {order.orderNote}</p>}
                         </div>
                       ))}
                     </div>
@@ -525,16 +629,16 @@ const App: React.FC = () => {
                     }} className="w-full bg-green-50 text-green-700 py-6 rounded-[2rem] font-black border border-green-100 flex items-center justify-center gap-3 hover:bg-green-100 active:scale-95 shadow-sm transition-all"><Download size={24} /> 匯出 CSV 檔案</button>
                     
                     <button onClick={() => {
-                       const content = getReportData('\t'); // TSV 格式
+                       const content = getReportData('\t');
                        navigator.clipboard.writeText(content);
-                       showToast('已複製！請至 Google 試算表貼上');
+                       showToast('已複製！請至試算表貼上');
                     }} className="w-full bg-blue-50 text-blue-700 py-6 rounded-[2rem] font-black border border-blue-100 flex items-center justify-center gap-3 hover:bg-blue-100 active:scale-95 shadow-sm transition-all"><FileSpreadsheet size={24} /> 複製貼上到 Sheets</button>
                   </div>
                 </div>
               ) : (
                 <div className="text-center py-24 text-gray-300 font-black border-2 border-dashed border-gray-50 rounded-[2.5rem] flex flex-col items-center gap-4">
                    <PackagePlus className="opacity-10" size={48} />
-                   <p className="leading-relaxed">目前尚未匯入任何同事的代碼<br/>請貼上同事發給您的代碼進行彙整</p>
+                   <p className="leading-relaxed">目前尚未有任何點單資料</p>
                 </div>
               )}
             </div>
