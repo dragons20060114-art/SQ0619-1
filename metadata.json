@@ -1,0 +1,7 @@
+{
+  "name": "QuickBite Corporate Ordering",
+  "description": "A streamlined corporate food ordering system featuring AI-powered menu recognition, multi-step checkout, and order history tracking.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

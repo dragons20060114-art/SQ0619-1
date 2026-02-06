@@ -1,0 +1,610 @@
+
+import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { 
+  Plus, 
+  Minus,
+  Trash2, 
+  Download, 
+  ClipboardCheck, 
+  User, 
+  IdCard, 
+  Phone,
+  ShoppingCart,
+  History,
+  Loader2,
+  ChevronRight,
+  Camera,
+  MessageSquare,
+  StickyNote,
+  CirclePlus,
+  Sparkles,
+  ChevronLeft,
+  Share2,
+  PackagePlus,
+  BarChart3,
+  Copy,
+  LayoutTemplate,
+  CheckCircle2,
+  QrCode,
+  Zap,
+  Tag,
+  ListOrdered
+} from 'lucide-react';
+import { OrderItem, UserInfo, OrderHistoryEntry, Step } from './types';
+import { analyzeMenuContent } from './services/geminiService';
+import { InputField, Toast, StepIndicator } from './components/UI';
+
+const generateId = () => Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
+
+const App: React.FC = () => {
+  const [step, setStep] = useState<Step>(Step.Selection);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [importText, setImportText] = useState('');
+  const [templateCode, setTemplateCode] = useState('');
+  const [showTemplateInput, setShowTemplateInput] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  const [userInfo, setUserInfo] = useState<UserInfo>({
+    empId: '',
+    empName: '',
+    phone: '',
+    orderNote: '' 
+  });
+
+  const [items, setItems] = useState<OrderItem[]>([
+    { 
+      id: generateId(), 
+      name: '', 
+      price: '', 
+      note: '', 
+      quantity: 0,
+      hasAddon: false,
+      addonName: '',
+      addonPrice: ''
+    }
+  ]);
+
+  const [history, setHistory] = useState<OrderHistoryEntry[]>([]);
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setIsAiAnalyzing(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64Data = (reader.result as string).split(',')[1];
+        try {
+          const orders = await analyzeMenuContent(base64Data, file.type);
+          if (orders.length > 0) {
+            const newItems: OrderItem[] = orders.map(order => ({
+              id: generateId(),
+              name: order.name,
+              price: order.price.toString(),
+              note: order.note || '',
+              quantity: 0,
+              hasAddon: false,
+              addonName: '',
+              addonPrice: ''
+            }));
+            setItems(newItems);
+            showToast(`成功辨識 ${orders.length} 個繁體中文品項`);
+          } else {
+            showToast('未能辨識到有效品項', 'error');
+          }
+        } catch (err) {
+          showToast('AI 辨識服務暫時不可用', 'error');
+        } finally {
+          setIsAiAnalyzing(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      showToast('讀取檔案失敗', 'error');
+      setIsAiAnalyzing(false);
+    }
+  };
+
+  const generateMenuTemplate = () => {
+    const menuTemplate = items.filter(i => i.name).map(i => ({
+      name: i.name,
+      price: i.price,
+      note: i.note,
+      hasAddon: i.hasAddon,
+      addonName: i.addonName,
+      addonPrice: i.addonPrice
+    }));
+    if (menuTemplate.length === 0) {
+      showToast('請先建立或辨識菜單品項', 'error');
+      return;
+    }
+    const code = btoa(encodeURIComponent(JSON.stringify(menuTemplate)));
+    navigator.clipboard.writeText(`MENU:${code}`);
+    showToast('菜單代碼已複製！請傳給同事');
+  };
+
+  const handleLoadTemplate = () => {
+    if (!templateCode.startsWith('MENU:')) {
+      showToast('無效的菜單代碼格式', 'error');
+      return;
+    }
+    try {
+      const raw = templateCode.replace('MENU:', '');
+      const decoded = JSON.parse(decodeURIComponent(atob(raw)));
+      const newItems = decoded.map((i: any) => ({
+        ...i,
+        id: generateId(),
+        quantity: 0
+      }));
+      setItems(newItems);
+      setTemplateCode('');
+      setShowTemplateInput(false);
+      showToast('成功載入同事分享的菜單！');
+    } catch (e) {
+      showToast('載入失敗，代碼可能不完整', 'error');
+    }
+  };
+
+  const updateQuantity = (id: string, delta: number) => {
+    setItems(prev => prev.map(item => {
+      if (item.id === id) {
+        const newQty = Math.max(0, item.quantity + delta);
+        return { ...item, quantity: newQty };
+      }
+      return item;
+    }));
+  };
+
+  const addItem = () => {
+    setItems(prev => [...prev, { 
+      id: generateId(), name: '', price: '', note: '', quantity: 0, hasAddon: false, addonName: '', addonPrice: '' 
+    }]);
+  };
+
+  const updateItem = (id: string, field: keyof OrderItem, value: any) => {
+    setItems(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+  };
+
+  const totalPrice = useMemo(() => {
+    return items.reduce((sum, item) => {
+      const price = parseFloat(item.price) || 0;
+      const addonPrice = item.hasAddon ? (parseFloat(item.addonPrice) || 0) : 0;
+      return sum + ((price + addonPrice) * item.quantity);
+    }, 0);
+  }, [items]);
+
+  const handleSubmit = async () => {
+    setIsLoading(true);
+    const activeItems = items.filter(item => item.name && item.quantity > 0);
+    const orderData: OrderHistoryEntry = {
+      ...userInfo,
+      items: activeItems.map(i => ({...i})),
+      total: totalPrice,
+      timestamp: new Date().toLocaleString()
+    };
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      setHistory(prev => [orderData, ...prev]);
+      setStep(Step.Success);
+    } catch (e) { 
+      showToast('發送失敗', 'error'); 
+    } finally { 
+      setIsLoading(false); 
+    }
+  };
+
+  const handleImportOrder = () => {
+    try {
+      const decoded = JSON.parse(decodeURIComponent(atob(importText.trim())));
+      if (history.find(h => h.empId === decoded.empId && h.timestamp === decoded.timestamp)) {
+        showToast('此訂單已存在', 'error');
+        return;
+      }
+      setHistory(prev => [decoded, ...prev]);
+      setImportText('');
+      showToast('成功匯入同事訂單！');
+    } catch (e) {
+      showToast('無效代碼', 'error');
+    }
+  };
+
+  const aggregateStats = useMemo(() => {
+    const stats: { [key: string]: { qty: number, total: number, details: string[] } } = {};
+    history.forEach(order => {
+      order.items.forEach(item => {
+        const key = `${item.name}${item.hasAddon && item.addonName ? `+${item.addonName}` : ''}${item.note ? `(${item.note})` : ''}`;
+        if (!stats[key]) stats[key] = { qty: 0, total: 0, details: [] };
+        stats[key].qty += item.quantity;
+        const unitPrice = parseFloat(item.price) + (item.hasAddon ? (parseFloat(item.addonPrice) || 0) : 0);
+        stats[key].total += unitPrice * item.quantity;
+        stats[key].details.push(`${order.empName} x${item.quantity}`);
+      });
+    });
+    return stats;
+  }, [history]);
+
+  return (
+    <div className="min-h-screen bg-[#F5F5F7] text-[#1D1D1F] p-4 md:p-8 flex flex-col items-center">
+      {isAiAnalyzing && (
+        <div className="fixed inset-0 bg-white/70 backdrop-blur-md z-[100] flex flex-col items-center justify-center">
+          <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div>
+          <p className="mt-4 font-bold text-blue-600">AI 正在辨識繁體中文菜單...</p>
+        </div>
+      )}
+
+      {toast && <Toast message={toast.message} type={toast.type} />}
+
+      <div className="w-full max-w-2xl">
+        <header className="mb-8 text-center animate-in slide-in-from-top-4">
+          <h1 className="text-4xl font-black tracking-tight mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">QuickBite</h1>
+          <p className="text-gray-500 font-medium text-sm tracking-widest">辦公室多人訂餐：先辨識，再分享</p>
+        </header>
+
+        <div className="bg-white rounded-[2.5rem] shadow-2xl shadow-blue-900/5 border border-white p-6 md:p-10 mb-8 relative overflow-hidden">
+          {step <= 3 && <StepIndicator currentStep={step} />}
+
+          {step === Step.Selection && (
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="flex flex-col gap-4 mb-8">
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => fileInputRef.current?.click()} 
+                    className="flex flex-col items-center justify-center gap-2 p-4 bg-blue-600 text-white rounded-[2rem] hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
+                  >
+                    <div className="bg-white/20 p-2 rounded-xl"><Camera size={24} /></div>
+                    <span className="text-sm font-black">拍照辨識菜單</span>
+                    <span className="text-[10px] opacity-70">我是發起人 (主辦人)</span>
+                  </button>
+                  <button 
+                    onClick={() => setShowTemplateInput(!showTemplateInput)} 
+                    className={`flex flex-col items-center justify-center gap-2 p-4 rounded-[2rem] border-2 transition-all ${showTemplateInput ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-gray-100 text-gray-600 hover:border-indigo-100'}`}
+                  >
+                    <div className={`${showTemplateInput ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-400'} p-2 rounded-xl transition-colors`}><QrCode size={24} /></div>
+                    <span className="text-sm font-black">輸入菜單代碼</span>
+                    <span className="text-[10px] opacity-70">我是參與者 (同事)</span>
+                  </button>
+                </div>
+
+                {showTemplateInput && (
+                  <div className="p-4 bg-indigo-50 rounded-3xl border border-indigo-100 animate-in slide-in-from-top-4 duration-300">
+                    <div className="flex gap-2">
+                      <input 
+                        placeholder="請貼上 MENU 開頭的分享代碼..." 
+                        className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-black" 
+                        value={templateCode}
+                        onChange={(e) => setTemplateCode(e.target.value)}
+                      />
+                      <button onClick={handleLoadTemplate} className="bg-indigo-600 text-white px-6 rounded-xl font-bold text-sm hover:bg-indigo-700">載入</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileUpload} />
+
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-black flex items-center gap-3">
+                  <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><ShoppingCart size={20} /></div>
+                  挑選餐點
+                </h2>
+                <button onClick={addItem} className="text-[10px] bg-gray-100 text-gray-500 px-4 py-2 rounded-full font-black hover:bg-gray-200 flex items-center gap-1 uppercase tracking-widest">
+                  <Plus size={14} /> 手動增加品項
+                </button>
+              </div>
+
+              <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar pb-4">
+                {items.length === 0 || (items.length === 1 && !items[0].name) ? (
+                  <div className="text-center py-10 border-2 border-dashed border-gray-100 rounded-[2.5rem]">
+                    <div className="text-gray-300 mb-3"><Zap size={40} className="mx-auto opacity-30" /></div>
+                    <p className="text-sm text-gray-400 font-bold">請先拍照辨識菜單</p>
+                  </div>
+                ) : (
+                  items.map((item) => (
+                    <div key={item.id} className="p-5 bg-white rounded-[2rem] border border-gray-100 shadow-sm transition-all hover:shadow-md hover:border-blue-100 group">
+                      <div className="grid grid-cols-12 gap-3 items-center mb-4">
+                        <div className="col-span-12 md:col-span-6">
+                          <input placeholder="品項名稱 (如：珍珠奶茶)" className="w-full bg-gray-50 border-none rounded-xl px-4 py-3 text-sm font-black focus:ring-2 focus:ring-blue-100" value={item.name} onChange={(e) => updateItem(item.id, 'name', e.target.value)} />
+                        </div>
+                        <div className="col-span-6 md:col-span-3 flex items-center bg-blue-50/50 rounded-xl p-1 border border-blue-100">
+                          <button onClick={() => updateQuantity(item.id, -1)} className="w-8 h-8 flex items-center justify-center text-blue-600 hover:bg-white rounded-lg transition-colors"><Minus size={16} /></button>
+                          <span className={`flex-1 text-center font-black ${item.quantity > 0 ? 'text-blue-600' : 'text-gray-300'}`}>{item.quantity}</span>
+                          <button onClick={() => updateQuantity(item.id, 1)} className="w-8 h-8 flex items-center justify-center text-blue-600 hover:bg-white rounded-lg transition-colors"><Plus size={16} /></button>
+                        </div>
+                        <div className="col-span-6 md:col-span-3 relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+                          <input type="number" placeholder="0" className="w-full bg-gray-50 border-none rounded-xl pl-6 pr-4 py-3 text-sm text-right font-mono font-black" value={item.price} onChange={(e) => updateItem(item.id, 'price', e.target.value)} />
+                        </div>
+                      </div>
+
+                      {item.hasAddon && (
+                        <div className="mb-4 p-3 bg-orange-50/50 rounded-2xl border border-orange-100 flex items-center gap-3 animate-in slide-in-from-top-2 duration-200">
+                          <Tag size={14} className="text-orange-400 shrink-0" />
+                          <input 
+                            placeholder="加料名稱 (如：珍珠)" 
+                            className="flex-1 bg-white border border-orange-100 rounded-lg px-3 py-2 text-[11px] font-black outline-none focus:ring-2 focus:ring-orange-200" 
+                            value={item.addonName} 
+                            onChange={(e) => updateItem(item.id, 'addonName', e.target.value)} 
+                          />
+                          <div className="relative w-20">
+                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-orange-300 text-[10px]">$</span>
+                            <input 
+                              type="number" 
+                              placeholder="0" 
+                              className="w-full bg-white border border-orange-100 rounded-lg pl-5 pr-2 py-2 text-[11px] text-right font-mono font-black outline-none focus:ring-2 focus:ring-orange-200" 
+                              value={item.addonPrice} 
+                              onChange={(e) => updateItem(item.id, 'addonPrice', e.target.value)} 
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex gap-2">
+                        <button onClick={() => updateItem(item.id, 'hasAddon', !item.hasAddon)} className={`text-[10px] px-3 py-2 rounded-full font-black transition-all ${item.hasAddon ? 'bg-orange-500 text-white shadow-md' : 'bg-gray-50 text-gray-400 hover:bg-gray-100'}`}>
+                          {item.hasAddon ? '取消加點' : '+加點/加料'}
+                        </button>
+                        <div className="flex-1 flex items-center gap-2 bg-red-50/30 px-3 py-1.5 rounded-xl border border-dashed border-red-100">
+                          <MessageSquare size={12} className="text-red-300" />
+                          <input placeholder="個人口味 (如：微糖少冰、加辣等)" className="w-full bg-transparent border-none p-0 text-[11px] text-red-600 font-black placeholder:text-red-200 outline-none" value={item.note} onChange={(e) => updateItem(item.id, 'note', e.target.value)} />
+                        </div>
+                        <button onClick={() => setItems(items.filter(i => i.id !== item.id))} className="text-gray-200 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"><Trash2 size={16} /></button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="mt-8 pt-8 border-t border-gray-100 flex flex-col sm:flex-row justify-between items-center gap-6">
+                <button 
+                  onClick={generateMenuTemplate} 
+                  className="group flex items-center gap-3 px-6 py-4 bg-indigo-600 text-white rounded-[1.5rem] font-black text-sm shadow-xl shadow-indigo-100 hover:scale-[1.02] active:scale-95 transition-all"
+                >
+                  <Share2 size={18} className="group-hover:rotate-12 transition-transform" />
+                  分享菜單代碼給同事
+                </button>
+                <div className="flex items-center gap-8 w-full sm:w-auto">
+                   <div className="text-right">
+                     <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">小計金額</p>
+                     <p className="text-3xl font-black text-blue-600 font-mono">${totalPrice}</p>
+                   </div>
+                   <button onClick={() => items.some(i => i.quantity > 0) ? setStep(Step.UserInfo) : showToast('請先選擇餐點', 'error')} className="flex-1 sm:flex-none px-12 py-5 bg-black text-white rounded-[1.5rem] font-black shadow-2xl flex items-center justify-center gap-2 hover:translate-x-1 transition-all">
+                     下一步 <ChevronRight size={20} />
+                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {step === Step.UserInfo && (
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <h2 className="text-2xl font-black mb-8 flex items-center gap-3">
+                <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><User size={24} /></div>
+                個人資訊
+              </h2>
+              <InputField icon={IdCard} label="員工編號 (選填)" placeholder="例如: TW12345" value={userInfo.empId} onChange={(e) => setUserInfo({...userInfo, empId: e.target.value})} />
+              <InputField icon={User} label="姓名 (必填)" placeholder="例如: 王小明" value={userInfo.empName} onChange={(e) => setUserInfo({...userInfo, empName: e.target.value})} />
+              <InputField icon={Phone} label="聯絡電話" placeholder="例如: 0912345678" type="tel" value={userInfo.phone} onChange={(e) => setUserInfo({...userInfo, phone: e.target.value})} />
+              
+              <div className="mt-8 bg-blue-50/40 p-6 rounded-[2rem] border border-blue-100">
+                <div className="flex items-center gap-3 mb-3 text-blue-600 font-black text-xs uppercase tracking-widest">
+                  <StickyNote size={18} /> 全單總備註
+                </div>
+                <textarea placeholder="例如：請將發票分開開立，或送達後請撥電話" className="w-full bg-transparent border-none p-0 focus:ring-0 text-sm h-20 outline-none resize-none font-bold" value={userInfo.orderNote} onChange={(e) => setUserInfo({...userInfo, orderNote: e.target.value})} />
+              </div>
+
+              <div className="flex gap-4 mt-10">
+                <button onClick={() => setStep(Step.Selection)} className="flex-1 bg-gray-100 text-gray-600 py-5 rounded-2xl font-black hover:bg-gray-200 transition-all flex items-center justify-center gap-2">
+                  <ChevronLeft size={20} /> 上一步
+                </button>
+                <button onClick={() => userInfo.empName ? setStep(Step.Review) : showToast('請填寫姓名', 'error')} className="flex-[2] bg-blue-600 text-white py-5 rounded-2xl font-black shadow-xl shadow-blue-200 flex items-center justify-center gap-2 hover:bg-blue-700 transition-all">
+                  最後確認 <ChevronRight size={20} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === Step.Review && (
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <h2 className="text-2xl font-black mb-6 flex items-center gap-3">
+                <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><ClipboardCheck size={24} /></div>
+                訂單最終確認
+              </h2>
+              <div className="bg-gray-50 rounded-[2.5rem] p-8 mb-8 border border-gray-100">
+                <div className="flex justify-between items-start mb-8 pb-6 border-b border-gray-200">
+                  <div>
+                    <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">訂購人</p>
+                    <p className="font-black text-xl">{userInfo.empName} <span className="text-gray-400 font-normal text-sm">{userInfo.empId && `(${userInfo.empId})`}</span></p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">總金額</p>
+                    <p className="font-black text-2xl text-blue-600 font-mono">${totalPrice}</p>
+                  </div>
+                </div>
+                
+                <div className="space-y-4 mb-8">
+                  {items.filter(i => i.quantity > 0).map((item, idx) => {
+                    const unitPrice = parseFloat(item.price) || 0;
+                    const addonPrice = item.hasAddon ? (parseFloat(item.addonPrice) || 0) : 0;
+                    return (
+                      <div key={idx} className="flex justify-between items-center text-sm">
+                        <div>
+                          <span className="font-black text-gray-800 text-base">{item.name}</span>
+                          {item.hasAddon && item.addonName && (
+                            <span className="ml-2 text-[11px] text-orange-500 font-black">+{item.addonName} (+${item.addonPrice})</span>
+                          )}
+                          {item.note && <span className="ml-2 text-[11px] text-red-500 font-black italic">({item.note})</span>}
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className="font-black text-blue-600 px-3 py-1 bg-blue-50 rounded-lg text-base">x{item.quantity}</span>
+                          <span className="font-mono text-gray-400 w-16 text-right font-black">${(unitPrice + addonPrice) * item.quantity}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {userInfo.orderNote && (
+                  <div className="bg-blue-50/50 p-4 rounded-2xl border border-blue-100">
+                    <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest mb-1 flex items-center gap-2">
+                      <StickyNote size={14} /> 全單總備註
+                    </p>
+                    <p className="text-sm font-bold text-blue-700">{userInfo.orderNote}</p>
+                  </div>
+                )}
+              </div>
+              <button onClick={handleSubmit} disabled={isLoading} className="w-full bg-blue-600 text-white py-6 rounded-3xl font-black text-xl shadow-2xl shadow-blue-200 flex items-center justify-center gap-3 hover:bg-blue-700 transition-all active:scale-[0.98]">
+                {isLoading ? <Loader2 className="animate-spin" /> : <><ClipboardCheck size={24} /> 送出訂單給主辦人</>}
+              </button>
+            </div>
+          )}
+
+          {step === Step.Success && (
+            <div className="text-center py-10 animate-in zoom-in-95">
+              <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-inner">
+                <CheckCircle2 size={48} />
+              </div>
+              <h2 className="text-3xl font-black mb-4">點餐成功！</h2>
+              <p className="text-gray-400 mb-10 text-sm max-w-xs mx-auto font-black leading-relaxed">請複製下方的「個人訂單代碼」，貼回 Line 群組給主辦人匯整。</p>
+              <div className="flex flex-col gap-4 max-w-sm mx-auto">
+                <button onClick={() => {
+                  const code = btoa(encodeURIComponent(JSON.stringify(history[0])));
+                  navigator.clipboard.writeText(code);
+                  showToast('個人代碼已複製！');
+                }} className="bg-blue-600 text-white py-5 rounded-[2rem] font-black shadow-2xl shadow-blue-200 flex items-center justify-center gap-3 hover:bg-blue-700 transition-all active:scale-95">
+                  <Copy size={24} /> 複製個人訂單代碼
+                </button>
+                <button onClick={() => {
+                   setItems([{ id: generateId(), name: '', price: '', note: '', quantity: 0, hasAddon: false, addonName: '', addonPrice: '' }]);
+                   setUserInfo({...userInfo, orderNote: ''});
+                   setStep(Step.Selection);
+                }} className="mt-4 text-gray-400 text-sm font-black hover:text-black transition-colors">
+                  再幫同事點一份
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === Step.History && (
+            <div className="animate-in fade-in duration-500">
+              <div className="flex justify-between items-center mb-8">
+                <h2 className="text-2xl font-black flex items-center gap-3">
+                  <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><BarChart3 size={24} /></div>
+                  主辦人彙整中心
+                </h2>
+                <button onClick={() => setStep(Step.Selection)} className="text-sm font-black text-gray-400 hover:text-blue-600 transition-colors uppercase tracking-widest">返回</button>
+              </div>
+
+              <div className="mb-10 bg-indigo-50/50 p-8 rounded-[2.5rem] border border-indigo-100">
+                <p className="text-xs text-indigo-700 font-black mb-4 flex items-center gap-2 uppercase tracking-widest">
+                  <PackagePlus size={18} /> 貼上同事回傳的代碼
+                </p>
+                <div className="flex gap-3">
+                  <input placeholder="請貼上同事回傳的個人代碼..." className="flex-1 bg-white border border-indigo-200 rounded-2xl px-5 py-4 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-black" value={importText} onChange={(e) => setImportText(e.target.value)} />
+                  <button onClick={handleImportOrder} className="bg-indigo-600 text-white px-8 rounded-2xl font-black text-sm hover:bg-indigo-700 shadow-lg shadow-indigo-100">匯入</button>
+                </div>
+              </div>
+
+              {history.length > 0 ? (
+                <div className="space-y-8">
+                  {/* 總統計結果 */}
+                  <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-8">
+                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-6 border-b pb-4">今日統計結果</h3>
+                    <div className="space-y-4">
+                      {(Object.entries(aggregateStats) as [string, { qty: number, total: number, details: string[] }][]).map(([key, stat]) => (
+                        <div key={key} className="flex justify-between items-center bg-gray-50/50 p-4 rounded-2xl border border-gray-50">
+                          <div className="flex-1">
+                            <p className="font-black text-gray-800 text-base">{key}</p>
+                            <p className="text-[11px] text-gray-400 font-black mt-1 leading-relaxed">{stat.details.join(' · ')}</p>
+                          </div>
+                          <div className="text-right ml-4">
+                            <p className="text-2xl font-black text-blue-600 font-mono">x{stat.qty}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 個人明細列表 */}
+                  <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-8">
+                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-6 border-b pb-4 flex items-center gap-2">
+                      <ListOrdered size={16} /> 個人訂單明細
+                    </h3>
+                    <div className="space-y-6">
+                      {history.map((order, idx) => (
+                        <div key={idx} className="p-5 bg-gray-50/30 rounded-3xl border border-gray-100">
+                          <div className="flex justify-between items-start mb-3">
+                            <div>
+                              <p className="font-black text-gray-800">{order.empName} <span className="font-normal text-xs text-gray-400">{order.empId && `(${order.empId})`}</span></p>
+                              <p className="text-[10px] text-gray-400 font-bold">{order.phone || '無電話'}</p>
+                            </div>
+                            <p className="font-mono font-black text-blue-600">${order.total}</p>
+                          </div>
+                          <div className="space-y-1 mb-3">
+                            {order.items.map((item, iidx) => (
+                              <p key={iidx} className="text-xs text-gray-600 font-medium">
+                                • {item.name} {item.hasAddon ? `+${item.addonName}` : ''} x{item.quantity} 
+                                {item.note && <span className="text-red-400 italic ml-1">({item.note})</span>}
+                              </p>
+                            ))}
+                          </div>
+                          {order.orderNote && (
+                            <div className="mt-2 pt-2 border-t border-gray-200/50">
+                              <p className="text-[10px] text-blue-500 font-black flex items-center gap-1 uppercase">
+                                <StickyNote size={12} /> 全單總備註：
+                              </p>
+                              <p className="text-[11px] font-bold text-blue-800 bg-blue-50 px-3 py-1.5 rounded-xl mt-1">{order.orderNote}</p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button onClick={() => {
+                     const headers = ['時間', '工號', '姓名', '電話', '品項明細', '全單備註', '總額'];
+                     const rows = history.map(h => [
+                       h.timestamp, 
+                       h.empId, 
+                       h.empName, 
+                       h.phone,
+                       `"${h.items.map(i => `${i.name}${i.hasAddon ? `+${i.addonName}` : ''}${i.note ? `(${i.note})` : ''}x${i.quantity}`).join('; ')}"`, 
+                       `"${h.orderNote || ''}"`,
+                       h.total
+                     ]);
+                     const csvContent = "\ufeff" + [headers, ...rows].map(r => r.join(',')).join('\n');
+                     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                     const link = document.createElement('a');
+                     link.href = URL.createObjectURL(blob);
+                     link.download = `QuickBite訂單彙整_${new Date().toISOString().split('T')[0]}.csv`;
+                     link.click();
+                  }} className="w-full bg-green-50 text-green-700 py-6 rounded-[2rem] font-black border border-green-100 flex items-center justify-center gap-3 hover:bg-green-100 transition-all shadow-lg shadow-green-100">
+                    <Download size={24} /> 匯出完整統計報表 (CSV)
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center py-24 text-gray-300 font-black border-2 border-dashed border-gray-50 rounded-[2.5rem]">
+                   <ShoppingCart size={48} className="mx-auto opacity-10 mb-4" />
+                   目前尚無資料，請開始匯入同事的代碼
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-center mb-10">
+           <button onClick={() => setStep(Step.History)} className="group px-6 py-3 bg-white/50 backdrop-blur-sm rounded-full border border-white text-[11px] font-black uppercase tracking-widest text-gray-400 hover:text-blue-600 hover:border-blue-100 transition-all flex items-center gap-3">
+             <BarChart3 size={14} className="group-hover:scale-110 transition-transform" /> 點此開啟主辦人彙整模式
+           </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
