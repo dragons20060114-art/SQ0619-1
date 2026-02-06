@@ -27,7 +27,8 @@ import {
   ListOrdered,
   Send,
   Undo2,
-  ShoppingBag
+  ShoppingBag,
+  FileSpreadsheet
 } from 'lucide-react';
 import { OrderItem, UserInfo, OrderHistoryEntry, Step } from './types';
 import { analyzeMenuContent } from './services/geminiService';
@@ -220,6 +221,22 @@ const App: React.FC = () => {
         showToast('同事點單匯入成功！');
       }
     } catch (e) { showToast('解析失敗，請確認代碼完整性', 'error'); }
+  };
+
+  const getReportData = (delimiter: string = ',') => {
+    const headers = ['時間', '姓名', '工號', '電話', '餐點明細', '加料詳情', '品項備註', '全單總備註', '總額'];
+    const rows = history.map(h => [
+       new Date(h.timestamp).toLocaleString(), 
+       h.empName, 
+       h.empId, 
+       h.phone, 
+       h.items.map(i => `${i.name}x${i.quantity}`).join('; '),
+       h.items.map(i => i.hasAddon && i.addonName ? i.addonName : '').filter(t => t).join('; '),
+       h.items.map(i => i.note || '').filter(t => t).join('; '),
+       h.orderNote || '', 
+       h.total
+    ]);
+    return [headers, ...rows].map(r => r.map(cell => `"${cell}"`).join(delimiter)).join('\n');
   };
 
   return (
@@ -495,26 +512,24 @@ const App: React.FC = () => {
                       ))}
                     </div>
                   </div>
-                  <button onClick={() => {
-                     const headers = ['時間', '姓名', '工號', '電話', '餐點明細', '加料詳情', '品項備註', '全單總備註', '總額'];
-                     const rows = history.map(h => [
-                        h.timestamp, 
-                        h.empName, 
-                        h.empId, 
-                        h.phone, 
-                        `"${h.items.map(i => `${i.name}x${i.quantity}`).join('; ')}"`,
-                        `"${h.items.map(i => i.hasAddon && i.addonName ? i.addonName : '').filter(t => t).join('; ')}"`,
-                        `"${h.items.map(i => i.note || '').filter(t => t).join('; ')}"`,
-                        `"${h.orderNote || ''}"`, 
-                        h.total
-                     ]);
-                     const csvContent = "\ufeff" + [headers, ...rows].map(r => r.join(',')).join('\n');
-                     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                     const link = document.createElement('a'); 
-                     link.href = URL.createObjectURL(blob); 
-                     link.download = `QuickBite報表_${new Date().toISOString().split('T')[0]}.csv`; 
-                     link.click();
-                  }} className="w-full bg-green-50 text-green-700 py-6 rounded-[2rem] font-black border border-green-100 flex items-center justify-center gap-3 hover:bg-green-100 active:scale-95 shadow-sm transition-all"><Download size={24} /> 匯出 CSV 完整大表</button>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <button onClick={() => {
+                       const content = getReportData(',');
+                       const blob = new Blob(["\ufeff" + content], { type: 'text/csv;charset=utf-8;' });
+                       const link = document.createElement('a'); 
+                       link.href = URL.createObjectURL(blob); 
+                       link.download = `QuickBite_${new Date().toISOString().split('T')[0]}.csv`; 
+                       link.click();
+                       showToast('CSV 已下載');
+                    }} className="w-full bg-green-50 text-green-700 py-6 rounded-[2rem] font-black border border-green-100 flex items-center justify-center gap-3 hover:bg-green-100 active:scale-95 shadow-sm transition-all"><Download size={24} /> 匯出 CSV 檔案</button>
+                    
+                    <button onClick={() => {
+                       const content = getReportData('\t'); // TSV 格式
+                       navigator.clipboard.writeText(content);
+                       showToast('已複製！請至 Google 試算表貼上');
+                    }} className="w-full bg-blue-50 text-blue-700 py-6 rounded-[2rem] font-black border border-blue-100 flex items-center justify-center gap-3 hover:bg-blue-100 active:scale-95 shadow-sm transition-all"><FileSpreadsheet size={24} /> 複製貼上到 Sheets</button>
+                  </div>
                 </div>
               ) : (
                 <div className="text-center py-24 text-gray-300 font-black border-2 border-dashed border-gray-50 rounded-[2.5rem] flex flex-col items-center gap-4">
